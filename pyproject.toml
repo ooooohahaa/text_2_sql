@@ -1,0 +1,17 @@
+[project]
+name = "text2sql"
+version = "0.1.0"
+description = "基于 LlamaIndex + GraphRAG 的 Text2SQL 工具，从自然语言生成并执行 SQL"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "llama-index>=0.11",
+    "llama-index-embeddings-openai>=0.6.0",
+    "llama-index-llms-openai>=0.7.2",
+    "llama-index-vector-stores-postgres>=0.5.0",
+    "pgvector>=0.4.1",
+    "psycopg[binary]>=3.2.0",
+    "pymysql>=1.1.2",
+    "python-dotenv>=1.2.2",
+    "sqlalchemy>=2.0.48",
+]
