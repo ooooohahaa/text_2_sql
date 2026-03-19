@@ -5,6 +5,8 @@ from typing import Any, Dict, List, Optional
 
 from llama_index.core import Settings
 
+from text2sql.prompts import get_prompt
+
 
 def _extract_sql(resp: Any) -> str:
     """兼容不同返回结构，尽量提取生成的 SQL。"""
@@ -33,20 +35,12 @@ def _llm_only_generate_sql(question: str, schema_text: str) -> str:
     """
     评测模式：不依赖数据库连接，仅基于 schema 文本生成 SQL。
     """
-    prompt = f"""你是一个资深 MySQL SQL 生成助手。请根据给定 schema 描述，为用户问题生成 SQL。
-
-要求：
-1) 只输出 SQL，不要解释。
-2) 使用 MySQL 5.7 兼容语法。
-3) 若问题信息不足，尽量给出最合理的可执行 SQL（可带保守条件）。
-4) 不要执行 SQL。
-
-【用户问题】
-{question}
-
-【Schema 描述】
-{schema_text}
-"""
+    template = get_prompt("llm_only_generate_sql")
+    # 为避免 JSON 中花括号与 format 语法冲突，这里使用简单占位符替换而非 str.format
+    prompt = (
+        template.replace("{question}", str(question))
+        .replace("{schema_text}", str(schema_text))
+    )
     resp = Settings.llm.complete(prompt)
     text = str(getattr(resp, "text", "") or resp)
     return _clean_sql_text(text)
@@ -62,31 +56,12 @@ def _review_sql(question: str, sql: str, schema_text: str) -> Dict[str, Any]:
         "suggestions": [str, ...]
     }
     """
-    review_prompt = f"""你是资深 SQL 评审专家。请评审候选 SQL 是否能正确回答用户问题，并符合给定 schema。
-
-请严格按 JSON 输出，且只输出 JSON，不要任何解释。格式如下：
-{{
-  "pass": true/false,
-  "issues": ["问题1", "问题2"],
-  "suggestions": ["改进建议1", "改进建议2"]
-}}
-
-评审标准：
-1) 是否与用户问题语义一致；
-2) 表/字段是否来自 schema 且关联合理；
-3) MySQL 5.7 语法是否可执行；
-4) 是否遗漏关键过滤、分组、排序、聚合逻辑；
-5) 若问题本身含糊，允许合理假设，但要在 issues/suggestions 指出。
-
-【用户问题】
-{question}
-
-【候选 SQL】
-{sql}
-
-【Schema 描述】
-{schema_text}
-"""
+    template = get_prompt("review_sql")
+    review_prompt = (
+        template.replace("{question}", str(question))
+        .replace("{sql}", str(sql))
+        .replace("{schema_text}", str(schema_text))
+    )
     raw = str(getattr(Settings.llm.complete(review_prompt), "text", "") or "")
     raw = raw.strip()
     if "```" in raw:
