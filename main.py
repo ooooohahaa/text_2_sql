@@ -6,7 +6,7 @@ Text2SQL 入口：构建 GraphRAG schema 索引并运行自然语言转 SQL 查�
   uv run python main.py "查询钻石最多的前10名玩家"  # 单次查询
   uv run python main.py --build-graphrag-only     # 仅构建 GraphRAG 并退出
   uv run python main.py --query-only "问题"        # 仅查询（不构建 GraphRAG）
-  uv run python main.py --testModel "问题"         # 评测模式：不连 MySQL，仅输出 SQL
+  uv run python main.py --testModel "问题"         # 评测：从 pgvector 加载索引后检索 schema，不连 MySQL
 """
 import argparse
 import json
@@ -53,7 +53,7 @@ def main():
     parser.add_argument(
         "--testModel",
         action="store_true",
-        help="评测模式：不连接 MySQL、不执行查询，仅调用 LLM 生成 SQL",
+        help="评测模式：不连接 MySQL；从 pgvector 加载已构建索引，向量检索 schema 后生成 SQL（需先 --build-graphrag-only）",
     )
     parser.add_argument(
         "question",
@@ -76,7 +76,7 @@ def main():
     # 初始化 LLM / Embedding
     init_llm_and_embedding()
 
-    # testModel：不构建 GraphRAG，不连接 MySQL，只输出 SQL
+    # testModel：从 pgvector 加载索引并向量检索 schema，不连接 MySQL，只输出 SQL
     if args.testModel:
         if not args.question:
             print("testModel 模式需要传入问题，例如：python main.py --testModel \"查询钻石最多的前10名玩家\"")

@@ -26,8 +26,10 @@ from text2sql.config import (
 )
 from text2sql.graphrag import (
     build_schema_graph,
+    format_retrieved_schema_context,
     get_schema_graph_artifacts,
     get_schema_retriever,
+    load_schema_index_from_pgvector,
 )
 from text2sql.sql_engine import create_sql_engine, create_sql_engine_with_schema_retriever
 
@@ -91,6 +93,13 @@ def build_graphrag_if_needed(query_only: bool) -> Any:
         f" communities={len(artifacts.get('communities', []))},"
         f" docs={artifacts.get('doc_count', 0)}"
     )
+    from text2sql.config import get_pgvector_config
+
+    if not get_pgvector_config().get("enabled"):
+        print(
+            "提示：未配置 PGVECTOR_URL，向量仅在内存中；"
+            "后续 --testModel 无法从库加载，请先配置 pgvector 并重新执行 --build-graphrag-only。"
+        )
     return get_schema_retriever(top_k=5)
 
 
@@ -122,12 +131,31 @@ def create_engine_with_optional_retriever(query_only: bool, retriever: Any) -> A
 
 def run_test_model(question: str, max_review_rounds: int, verbose_review: bool) -> dict:
     """
-    评测模式：不构建 GraphRAG、不连接 MySQL，只输出 SQL。
-    返回 run_multi_agent_react 的结果字典，供 CLI 层打印。
+    评测模式：不连接 MySQL，只输出 SQL。
+
+    不执行 GraphRAG 构建：从已持久化的 pgvector 加载索引，
+    再按当前问题做一次向量检索，将命中的 schema 片段作为写作/评审上下文。
+
+    请先运行 ``python main.py --build-graphrag-only``（且需配置 PGVECTOR_URL）写入向量。
     """
-    _, schema_text = load_schema_text()
+    q = question.strip()
+    top_k = int(os.getenv("TESTMODEL_RETRIEVER_TOP_K", "8"))
+
+    print("评测模式：从 pgvector 加载已构建的 schema 向量索引（不重建）...")
+    load_schema_index_from_pgvector()
+
+    retriever = get_schema_retriever(top_k=top_k)
+    schema_text = format_retrieved_schema_context(retriever, q)
+    if not schema_text.strip():
+        raise RuntimeError(
+            "向量检索未返回任何 schema 片段。请检查 Embedding 配置、索引是否写入成功（如 PGVECTOR），"
+            "或增大 TESTMODEL_RETRIEVER_TOP_K 后重试。"
+        )
+
+    print(f"评测模式：已用向量检索取回 top_k={top_k} 条 schema 上下文（非全量文档）。")
+
     return run_multi_agent_react(
-        question=question.strip(),
+        question=q,
         schema_text=schema_text,
         engine=None,
         llm_only=True,

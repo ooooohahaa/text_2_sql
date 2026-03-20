@@ -236,7 +236,11 @@ def load_schema_documents(schema_path: Path) -> list[Document]:
     return [_table_document(t) for t in tables]
 
 
-def _build_storage_context_from_pgvector():
+def _create_pgvector_store():
+    """
+    按配置创建 PGVectorStore；未启用 PGVECTOR_URL 时返回 None。
+    构建索引与从库加载索引共用同一套连接参数。
+    """
     from text2sql.config import get_pgvector_config
 
     pg_cfg = get_pgvector_config()
@@ -254,7 +258,7 @@ def _build_storage_context_from_pgvector():
     db_url = make_url(pg_cfg["url"])
     # 兼容不同 SQLAlchemy URL 形式，显式拆分参数比 connection_string 更稳定。
     # 某些依赖组合会在内部把端口处理成字符串 "None"，导致 create_async_engine 解析失败。
-    vector_store = PGVectorStore.from_params(
+    return PGVectorStore.from_params(
         host=db_url.host or "localhost",
         port=int(db_url.port or 5432),
         database=(db_url.database or "").lstrip("/"),
@@ -264,7 +268,13 @@ def _build_storage_context_from_pgvector():
         schema_name=pg_cfg["schema_name"],
         embed_dim=pg_cfg["embed_dim"],
     )
-    return StorageContext.from_defaults(vector_store=vector_store)
+
+
+def _build_storage_context_from_pgvector():
+    store = _create_pgvector_store()
+    if store is None:
+        return None
+    return StorageContext.from_defaults(vector_store=store)
 
 
 _schema_index: Optional[VectorStoreIndex] = None
@@ -344,6 +354,36 @@ def build_schema_graph(
     return index
 
 
+def load_schema_index_from_pgvector(embed_model=None) -> VectorStoreIndex:
+    """
+    从已持久化的 pgvector 表加载向量索引（不解析 Markdown、不重建图）。
+
+    适用于先执行 ``main.py --build-graphrag-only`` 写入向量后，
+    在 ``--testModel`` 等场景仅做向量检索。
+    """
+    global _schema_index
+    global _schema_graph_artifacts
+
+    from llama_index.core import Settings
+
+    store = _create_pgvector_store()
+    if store is None:
+        raise RuntimeError(
+            "未配置 PGVECTOR_URL，无法从 pgvector 加载已构建的索引。"
+            "请先在 .env 中配置 PGVECTOR_*，执行: python main.py --build-graphrag-only，"
+            "再使用 --testModel。"
+        )
+
+    emb = embed_model if embed_model is not None else Settings.embed_model
+    if emb is None:
+        raise RuntimeError("未设置 Settings.embed_model，无法对查询做向量化。请先 init_llm_and_embedding()。")
+
+    index = VectorStoreIndex.from_vector_store(vector_store=store, embed_model=emb)
+    _schema_index = index
+    _schema_graph_artifacts = {}
+    return index
+
+
 def get_schema_graph_index() -> Optional[VectorStoreIndex]:
     return _schema_index
 
@@ -358,3 +398,38 @@ def get_schema_retriever(top_k: int = 5):
     if idx is None:
         raise RuntimeError("请先调用 build_schema_graph() 构建 schema GraphRAG 索引")
     return idx.as_retriever(similarity_top_k=top_k)
+
+
+def format_retrieved_schema_context(retriever, question: str) -> str:
+    """
+    使用已构建的 GraphRAG 向量索引，按问题做一次真实向量检索，
+    将命中的节点文本拼接为供 LLM 使用的 schema 上下文（非全量 Markdown）。
+    """
+    results = retriever.retrieve(question)
+    if not results:
+        return ""
+
+    parts: list[str] = []
+    for i, node_with_score in enumerate(results, start=1):
+        score = getattr(node_with_score, "score", None)
+        meta = getattr(node_with_score.node, "metadata", None) or {}
+        doc_type = meta.get("doc_type", "")
+        header_bits = [f"片段 {i}"]
+        if score is not None:
+            header_bits.append(f"相似度 {score:.4f}")
+        if doc_type:
+            header_bits.append(f"type={doc_type}")
+        if meta.get("table"):
+            header_bits.append(f"table={meta['table']}")
+        if meta.get("community_id") is not None:
+            header_bits.append(f"community_id={meta['community_id']}")
+
+        header = " | ".join(header_bits)
+        body = node_with_score.get_content()
+        parts.append(f"### {header}\n{body}")
+
+    preamble = (
+        "以下是与当前问题最相关的 schema 片段（由向量检索得到，非完整库表说明）。"
+        "生成 SQL 时请优先依据这些表与字段；若信息不足请明确说明缺什么。\n\n"
+    )
+    return preamble + "\n\n".join(parts)
