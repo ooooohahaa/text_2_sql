@@ -35,6 +35,7 @@ text2sql/
 ├── pyproject.toml       # 依赖与项目配置（uv）
 ├── .env.example          # 环境变量示例
 ├── schema_description_for_graphrag.md   # schema 与实体描述（供 GraphRAG 解析）
+├── prompts/             # 多 Agent 提示词（.txt，可多行）
 ├── schema/              # 建表 SQL（参考）
 └── text2sql/            # 主包
     ├── config.py        # 配置（数据库 URL、OpenAI、schema 路径）
@@ -56,6 +57,11 @@ text2sql/
 | `OPENAI_API_KEY` | OpenAI API Key（必填） |
 | `DATABASE_URL` | MySQL 连接串，如 `mysql+pymysql://user:pass@host:3306/DB_SPLAN_00?charset=utf8mb4` |
 | `SCHEMA_DESCRIPTION_PATH` | 可选；schema 描述 Markdown 路径，默认项目根下 `schema_description_for_graphrag.md` |
+
+## Prompt 配置
+
+多 Agent 使用的提示词放在 **`prompts/` 目录下的 `.txt` 文件**中，可多行编辑，详见 `prompts/README.md`。  
+可选：仍支持项目根目录 `prompts.json` 覆盖（JSON 字符串内用 `\n` 表示换行）；**同名 key 以 `prompts/*.txt` 为准**。
 
 ## 开发
 

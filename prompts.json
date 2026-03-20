@@ -1,5 +1,0 @@
-{
-  "llm_only_generate_sql": "你是一个资深 MySQL SQL 生成助手。请根据给定 schema 描述，为用户问题生成 SQL。\n\n要求：\n1) 只输出 SQL，不要解释。\n2) 使用 MySQL 5.7 兼容语法。\n3) 若问题信息不足，尽量给出最合理的可执行 SQL（可带保守条件）。\n4) 不要执行 SQL。\n\n【用户问题】\n{question}\n\n【Schema 描述】\n{schema_text}\n",
-  "review_sql": "你是资深 SQL 评审专家。请评审候选 SQL 是否能正确回答用户问题，并符合给定 schema。\n\n请严格按 JSON 输出，且只输出 JSON，不要任何解释。格式如下：\n{\n  \"pass\": true/false,\n  \"issues\": [\"问题1\", \"问题2\"],\n  \"suggestions\": [\"改进建议1\", \"改进建议2\"]\n}\n\n评审标准：\n1) 是否与用户问题语义一致；\n2) 表/字段是否来自 schema 且关联合理；\n3) MySQL 5.7 语法是否可执行；\n4) 是否遗漏关键过滤、分组、排序、聚合逻辑；\n5) 若问题本身含糊，允许合理假设，但要在 issues/suggestions 指出。\n\n【用户问题】\n{question}\n\n【候选 SQL】\n{sql}\n\n【Schema 描述】\n{schema_text}\n",
-  "llm_only_generate_sql_hint": "这里写 few-shot / CoT 的额外提示词，会自动拼接到主提示词后面。"
-}

@@ -1,19 +1,16 @@
 from __future__ import annotations
 
 """
-Prompt 管理：
-- 优先从项目根目录的 prompts.json 读取
-- 若缺失或字段缺失，则回退到内置默认模板
+Prompt 管理（推荐：项目根目录 prompts/*.txt，可多行、易读）
 
-prompts.json 示例结构（示意）：
-{
-  "llm_only_generate_sql": "... {question} ... {schema_text} ...",
-  "review_sql": "... {question} ... {sql} ... {schema_text} ...",
+加载顺序（后者覆盖前者）：
+1. 内置默认模板 _DEFAULT_PROMPTS
+2. 项目根目录 prompts.json（可选，兼容旧版单行 JSON 字符串）
+3. 项目根目录 prompts/<name>.txt（推荐日常维护）
 
-  // 可选：仅当存在该字段时，才会被自动注入到 llm_only_generate_sql 提示中
-  // 示例用法：few-shot / CoT 额外说明、示例等
-  "llm_only_generate_sql_hint": "这里写 few-shot / CoT 风格的额外提示词，将自动追加在主提示词之后。"
-}
+占位符在 agents 中用简单字符串替换注入：
+- llm_only_generate_sql: {question}, {schema_text}
+- review_sql: {question}, {sql}, {schema_text}
 """
 
 import json
@@ -61,46 +58,72 @@ _DEFAULT_PROMPTS: Dict[str, str] = {
 【Schema 描述】
 {schema_text}
 """,
+    # 可选；默认空，由 prompts/llm_only_generate_sql_hint.txt 覆盖
+    "llm_only_generate_sql_hint": "",
 }
 
 _PROMPTS_CACHE: Dict[str, str] | None = None
 
 
-def _load_prompts_from_file() -> Dict[str, str]:
-    """
-    从项目根目录的 prompts.json 读取配置。
-    - 若文件不存在或解析失败，则返回空 dict，由默认模板兜底。
-    """
-    project_root = Path(__file__).resolve().parents[1]
-    config_path = project_root / "prompts.json"
+def _project_root() -> Path:
+    return Path(__file__).resolve().parents[1]
+
+
+def _load_prompts_from_json() -> Dict[str, str]:
+    """从 prompts.json 读取（可选）。解析失败返回空 dict。"""
+    config_path = _project_root() / "prompts.json"
     if not config_path.exists():
         return {}
     try:
         data = json.loads(config_path.read_text(encoding="utf-8"))
         if isinstance(data, dict):
-            # 仅接受 str->str 的键值
-            return {str(k): str(v) for k, v in data.items()}
+            return {str(k): str(v) for k, v in data.items() if isinstance(v, str)}
     except Exception:
         return {}
     return {}
+
+
+def _load_prompts_from_txt_dir() -> Dict[str, str]:
+    """
+    从 prompts/*.txt 读取：文件名（不含 .txt）为 key，文件内容为模板。
+    """
+    prompts_dir = _project_root() / "prompts"
+    if not prompts_dir.is_dir():
+        return {}
+    out: Dict[str, str] = {}
+    for path in sorted(prompts_dir.glob("*.txt")):
+        key = path.stem
+        if not key:
+            continue
+        try:
+            text = path.read_text(encoding="utf-8")
+        except OSError:
+            continue
+        out[key] = text
+    return out
 
 
 def _ensure_prompts_loaded() -> None:
     global _PROMPTS_CACHE
     if _PROMPTS_CACHE is not None:
         return
-    file_prompts = _load_prompts_from_file()
     merged = dict(_DEFAULT_PROMPTS)
-    merged.update(file_prompts)
+    merged.update(_load_prompts_from_json())
+    merged.update(_load_prompts_from_txt_dir())
     _PROMPTS_CACHE = merged
 
 
 def get_prompt(name: str) -> str:
     """
     获取指定名称的 prompt 模板。
-    优先使用 prompts.json 中的配置，缺失时回退到内置默认模板。
+    txt 目录中的配置优先于 prompts.json，二者均覆盖内置默认。
     """
     _ensure_prompts_loaded()
     assert _PROMPTS_CACHE is not None
     return _PROMPTS_CACHE.get(name, _DEFAULT_PROMPTS.get(name, ""))
 
+
+def reload_prompts() -> None:
+    """测试或热加载时可调用，清空缓存后下次 get_prompt 重新读盘。"""
+    global _PROMPTS_CACHE
+    _PROMPTS_CACHE = None
