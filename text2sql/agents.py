@@ -36,6 +36,14 @@ def _llm_only_generate_sql(question: str, schema_text: str) -> str:
     评测模式：不依赖数据库连接，仅基于 schema 文本生成 SQL。
     """
     template = get_prompt("llm_only_generate_sql")
+
+    # 从 prompts.json 读取可选的 hint 字段，仅当用户显式配置时才注入
+    # - 若 prompts.json 中不存在 "llm_only_generate_sql_hint"，get_prompt 返回空串，不生效
+    # - 若存在，则会作为补充提示追加在主模板之后（适合 few-shot / CoT 说明）
+    hint = get_prompt("llm_only_generate_sql_hint")
+    if hint and hint.strip():
+        template = f"{template}\n\n{hint.strip()}"
+
     # 为避免 JSON 中花括号与 format 语法冲突，这里使用简单占位符替换而非 str.format
     prompt = (
         template.replace("{question}", str(question))

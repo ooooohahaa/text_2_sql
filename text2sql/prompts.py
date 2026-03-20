@@ -5,10 +5,14 @@ Prompt 管理：
 - 优先从项目根目录的 prompts.json 读取
 - 若缺失或字段缺失，则回退到内置默认模板
 
-prompts.json 示例结构：
+prompts.json 示例结构（示意）：
 {
   "llm_only_generate_sql": "... {question} ... {schema_text} ...",
-  "review_sql": "... {question} ... {sql} ... {schema_text} ..."
+  "review_sql": "... {question} ... {sql} ... {schema_text} ...",
+
+  // 可选：仅当存在该字段时，才会被自动注入到 llm_only_generate_sql 提示中
+  // 示例用法：few-shot / CoT 额外说明、示例等
+  "llm_only_generate_sql_hint": "这里写 few-shot / CoT 风格的额外提示词，将自动追加在主提示词之后。"
 }
 """
 
