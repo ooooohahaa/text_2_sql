@@ -27,8 +27,10 @@ from text2sql.config import (
 from text2sql.graphrag import (
     build_schema_graph,
     format_retrieved_schema_context,
+    get_local_search_retriever,
     get_schema_graph_artifacts,
     get_schema_retriever,
+    load_artifacts_from_local,
     load_schema_index_from_pgvector,
 )
 from text2sql.sql_engine import create_sql_engine, create_sql_engine_with_schema_retriever
@@ -83,24 +85,19 @@ def build_graphrag_if_needed(query_only: bool) -> Any:
         print("已启用 --query-only：跳过 GraphRAG 构建。")
         return None
 
-    print("正在构建 schema GraphRAG（图构建 + 社区摘要 + 向量索引）...")
+    print("正在构建 schema GraphRAG（LLM 抽取 + 建图 + 社区 + 向量索引）...")
     build_schema_graph(schema_path=get_schema_description_path())
     artifacts = get_schema_graph_artifacts()
     print(
         "GraphRAG 构建完成："
-        f" nodes={len(artifacts.get('nodes', []))},"
-        f" edges={len(artifacts.get('edges', []))},"
+        f" entities={len(artifacts.get('entities', []))},"
+        f" relations={len(artifacts.get('relations', []))},"
         f" communities={len(artifacts.get('communities', []))},"
         f" docs={artifacts.get('doc_count', 0)}"
     )
-    from text2sql.config import get_pgvector_config
 
-    if not get_pgvector_config().get("enabled"):
-        print(
-            "提示：未配置 PGVECTOR_URL，向量仅在内存中；"
-            "后续 --testModel 无法从库加载，请先配置 pgvector 并重新执行 --build-graphrag-only。"
-        )
-    return get_schema_retriever(top_k=5)
+    # 使用标准 GraphRAG 局部检索器
+    return get_local_search_retriever(artifacts=artifacts)
 
 
 def create_engine_with_optional_retriever(query_only: bool, retriever: Any) -> Any:
@@ -133,26 +130,40 @@ def run_test_model(question: str, max_review_rounds: int, verbose_review: bool) 
     """
     评测模式：不连接 MySQL，只输出 SQL。
 
-    不执行 GraphRAG 构建：从已持久化的 pgvector 加载索引，
-    再按当前问题做一次向量检索，将命中的 schema 片段作为写作/评审上下文。
-
-    请先运行 ``python main.py --build-graphrag-only``（且需配置 PGVECTOR_URL）写入向量。
+    优先使用 GraphRAG 局部检索（需先 --build-graphrag-only 构建）。
+    若构建产物中有实体嵌入，则走标准局部检索；否则回退到 pgvector 向量检索。
     """
     q = question.strip()
     top_k = int(os.getenv("TESTMODEL_RETRIEVER_TOP_K", "8"))
 
-    print("评测模式：从 pgvector 加载已构建的 schema 向量索引（不重建）...")
-    load_schema_index_from_pgvector()
+    # 优先从内存 -> 本地文件 -> pgvector 回退链加载 artifacts
+    artifacts = get_schema_graph_artifacts()
+    if not artifacts or not artifacts.get("entity_embeddings"):
+        try:
+            artifacts = load_artifacts_from_local()
+            print("评测模式：从本地文件加载 GraphRAG artifacts 成功。")
+        except FileNotFoundError:
+            artifacts = None
 
-    retriever = get_schema_retriever(top_k=top_k)
+    if artifacts and artifacts.get("entity_embeddings"):
+        print("评测模式：使用 GraphRAG 局部检索（实体语义匹配 + 社区召回 + 上下文排序）。")
+        retriever = get_local_search_retriever(
+            artifacts=artifacts,
+            context_budget=top_k,
+        )
+    else:
+        print("评测模式：本地 artifacts 不可用，回退到 pgvector 向量检索...")
+        load_schema_index_from_pgvector()
+        retriever = get_schema_retriever(top_k=top_k)
+
     schema_text = format_retrieved_schema_context(retriever, q)
     if not schema_text.strip():
         raise RuntimeError(
-            "向量检索未返回任何 schema 片段。请检查 Embedding 配置、索引是否写入成功（如 PGVECTOR），"
-            "或增大 TESTMODEL_RETRIEVER_TOP_K 后重试。"
+            "检索未返回任何 schema 片段。请先执行 --build-graphrag-only 构建图谱，"
+            "或检查 Embedding 配置后重试。"
         )
 
-    print(f"评测模式：已用向量检索取回 top_k={top_k} 条 schema 上下文（非全量文档）。")
+    print(f"评测模式：检索完成，取回 schema 上下文。")
 
     return run_multi_agent_react(
         question=q,
