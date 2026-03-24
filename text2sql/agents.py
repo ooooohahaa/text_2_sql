@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from typing import Any, Dict, List, Optional
 
 from llama_index.core import Settings
@@ -31,6 +32,148 @@ def _clean_sql_text(text: str) -> str:
     return text
 
 
+def _extract_table_column_whitelist(schema_text: str) -> dict[str, set[str]]:
+    """
+    从 schema 上下文中抽取白名单: {table_name -> set(columns)}。
+    兼容 [TABLE] 片段格式。
+    """
+    whitelist: dict[str, set[str]] = {}
+    lines = (schema_text or "").splitlines()
+    i = 0
+    while i < len(lines):
+        line = lines[i].strip()
+        if line == "[TABLE]":
+            table_name = ""
+            cols: set[str] = set()
+            j = i + 1
+            while j < len(lines):
+                s = lines[j].strip()
+                if s.startswith("[TABLE]") or s.startswith("[COMMUNITY") or s.startswith("### "):
+                    break
+                if s.startswith("表名:"):
+                    table_name = s.split(":", 1)[1].strip()
+                m = re.match(r"^-\s*([a-zA-Z_]\w*)\s*\(", s)
+                if m:
+                    cols.add(m.group(1))
+                j += 1
+            if table_name:
+                whitelist[table_name] = cols
+            i = j
+            continue
+        i += 1
+    return whitelist
+
+
+def _deterministic_sql_check(sql: str, schema_text: str) -> Dict[str, Any]:
+    """
+    Deterministic checker:
+    1) 用 sqlglot 检查 MySQL 语法
+    2) 提取 table/column，与 schema 白名单比对
+    """
+    issues: list[str] = []
+    suggestions: list[str] = []
+    sql = (sql or "").strip()
+    if not sql:
+        return {
+            "pass": False,
+            "issues": ["SQL 为空。"],
+            "suggestions": ["请输出一条完整可执行的 MySQL SQL。"],
+        }
+
+    try:
+        import sqlglot
+        from sqlglot import exp
+    except Exception:
+        return {"pass": True, "issues": [], "suggestions": []}
+
+    try:
+        parsed = sqlglot.parse_one(sql, read="mysql")
+    except Exception as exc:
+        return {
+            "pass": False,
+            "issues": [f"MySQL 语法解析失败: {exc}"],
+            "suggestions": ["请使用 MySQL 5.7 兼容语法重写 SQL。"],
+        }
+
+    whitelist = _extract_table_column_whitelist(schema_text)
+    if not whitelist:
+        return {"pass": True, "issues": [], "suggestions": []}
+
+    def _fields_hint(table_name: str) -> str:
+        cols = sorted(whitelist.get(table_name, set()))
+        if not cols:
+            return f"表 `{table_name}` 未提取到字段列表。"
+        # 避免提示过长影响上下文
+        shown = cols[:80]
+        suffix = " ..." if len(cols) > 80 else ""
+        return f"表 `{table_name}` 可用字段: {', '.join(shown)}{suffix}"
+
+    table_alias_to_name: dict[str, str] = {}
+    referenced_tables: set[str] = set()
+    emitted_field_hints: set[str] = set()
+
+    for t in parsed.find_all(exp.Table):
+        raw_name = t.name
+        alias = t.alias_or_name
+        if not raw_name:
+            continue
+        matched = None
+        for real_t in whitelist:
+            if real_t.lower() == raw_name.lower():
+                matched = real_t
+                break
+        if matched is None:
+            issues.append(f"引用了不在检索 schema 白名单中的表: {raw_name}")
+            suggestions.append("请仅使用检索到的表名，或先补充更相关的 schema 上下文。")
+            continue
+        referenced_tables.add(matched)
+        table_alias_to_name[alias] = matched
+        table_alias_to_name[raw_name] = matched
+
+    for c in parsed.find_all(exp.Column):
+        col = c.name
+        tbl = c.table
+        if not col:
+            continue
+        if tbl:
+            resolved = table_alias_to_name.get(tbl)
+            if not resolved:
+                issues.append(f"字段引用了未知表/别名: {tbl}.{col}")
+                suggestions.append("请检查 JOIN 中的表别名与字段前缀是否一致。")
+                continue
+            if col not in whitelist.get(resolved, set()):
+                issues.append(f"字段不存在: {resolved}.{col}")
+                suggestions.append(f"请改用表 `{resolved}` 中实际存在的字段名。")
+                if resolved not in emitted_field_hints:
+                    suggestions.append(_fields_hint(resolved))
+                    emitted_field_hints.add(resolved)
+        else:
+            # 未带表前缀的字段
+            if len(referenced_tables) == 1:
+                only_t = next(iter(referenced_tables))
+                if col not in whitelist.get(only_t, set()):
+                    issues.append(f"字段不存在: {only_t}.{col}")
+                    suggestions.append("请确认字段名拼写，或补充正确字段。")
+                    if only_t not in emitted_field_hints:
+                        suggestions.append(_fields_hint(only_t))
+                        emitted_field_hints.add(only_t)
+            elif len(referenced_tables) > 1:
+                exists = any(col in whitelist.get(t, set()) for t in referenced_tables)
+                if not exists:
+                    issues.append(f"未限定字段且在候选表中不存在: {col}")
+                    suggestions.append("多表查询时请使用 `表别名.字段名`，并确保字段真实存在。")
+                    for t in sorted(referenced_tables):
+                        if t not in emitted_field_hints:
+                            suggestions.append(_fields_hint(t))
+                            emitted_field_hints.add(t)
+
+    return {
+        "pass": not issues,
+        "issues": issues,
+        "suggestions": suggestions,
+    }
+
+
 def _llm_only_generate_sql(question: str, schema_text: str) -> str:
     """
     评测模式：不依赖数据库连接，仅基于 schema 文本生成 SQL。
@@ -49,9 +192,9 @@ def _llm_only_generate_sql(question: str, schema_text: str) -> str:
         template.replace("{question}", str(question))
         .replace("{schema_text}", str(schema_text))
     )
-    # print("--------------------------------")
-    # print(prompt)
-    # print("--------------------------------")
+    print("--------------------------------")
+    print(prompt)
+    print("--------------------------------")
     resp = Settings.llm.complete(prompt)
     text = str(getattr(resp, "text", "") or resp)
     return _clean_sql_text(text)
@@ -67,6 +210,11 @@ def _review_sql(question: str, sql: str, schema_text: str) -> Dict[str, Any]:
         "suggestions": [str, ...]
     }
     """
+    # 先做 deterministic checker，失败则直接返回结构化结果
+    deterministic = _deterministic_sql_check(sql=sql, schema_text=schema_text)
+    if not deterministic.get("pass"):
+        return deterministic
+
     template = get_prompt("review_sql")
     review_prompt = (
         template.replace("{question}", str(question))

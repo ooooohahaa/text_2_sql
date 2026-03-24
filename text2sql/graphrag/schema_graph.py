@@ -415,7 +415,11 @@ def _parse_schema_markdown(content: str) -> list[TableInfo]:
         re.DOTALL,
     )
     entity_pattern = re.compile(r"\*\*实体含义\*\*[：:]\s*(.+?)(?=\n\n|\n\||$)", re.DOTALL)
-    table_row = re.compile(r"\|\s*(?P<col>\w+)\s*\|\s*([^|]+)\s*\|\s*([^|]+)\s*\|")
+    # [^|\n]+ 排斥换行，防止跨行匹配导致字段错位
+    # (?P<col>...) 支持逗号分隔的多字段名如 crtWin, crtLos
+    table_row = re.compile(
+        r"\|\s*(?P<col>[\w]+(?:\s*,\s*\w+)*)\s*\|\s*(?P<ctype>[^|\n]+?)\s*\|\s*(?P<meaning>[^|\n]+?)\s*\|"
+    )
 
     for m in block_pattern.finditer(content):
         table_name = m.group("table").strip()
@@ -428,13 +432,14 @@ def _parse_schema_markdown(content: str) -> list[TableInfo]:
             col_name = row.group("col").strip()
             if col_name in ("字段名", "---"):
                 continue
-            cols.append(
-                ColumnInfo(
-                    name=col_name,
-                    col_type=row.group(2).strip(),
-                    meaning=row.group(3).strip(),
+            # 逗号分隔的多字段名拆开，每个独立存储
+            col_names = [c.strip() for c in col_name.split(",") if c.strip()]
+            col_type = row.group("ctype").strip()
+            meaning = row.group("meaning").strip()
+            for cn in col_names:
+                cols.append(
+                    ColumnInfo(name=cn, col_type=col_type, meaning=meaning)
                 )
-            )
 
         tables.append(TableInfo(name=table_name, entity=entity, columns=cols))
     return tables
